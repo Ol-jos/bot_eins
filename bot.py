@@ -1,154 +1,130 @@
 import os
-import re
-from telegram import Update, KeyboardButton, ReplyKeyboardMarkup, ReplyKeyboardRemove, InputFile
-from telegram.ext import ApplicationBuilder, CommandHandler, MessageHandler, filters, ConversationHandler, ContextTypes, CallbackContext
+from telegram import Update, InputFile, ReplyKeyboardMarkup, KeyboardButton
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler,
+    ContextTypes, ConversationHandler, CallbackContext, filters
+)
 from deep_translator import GoogleTranslator
-from flask import Flask
+import logging
+import re
 
+# --- Logging ---
+logging.basicConfig(format='%(asctime)s - %(name)s - %(levelname)s - %(message)s', level=logging.INFO)
+
+# --- States ---
 LANGUAGE_SELECTION, CONFIRM_TRANSLATION = range(2)
+
+# --- Languages ---
 LANGUAGES = {
-    "Arabic 🇸🇮": "arabic",
-    "Chinese 🇨🇳": "chinese (simplified)",
-    "English 🇬🇧": "english",
-    "French 🇫🇷": "french",
-    "German 🇩🇪": "german",
-    "Hindi 🇥🇰": "hindi",
-    "Italian 🇮🇹": "italian",
-    "Japanese 🇯🇵": "japanese",
-    "Korean 🇰🇷": "korean",
-    "Polish 🇵🇱": "polish",
-    "Portuguese 🇵🇹": "portuguese",
-    "Russian 🇷🇺": "russian",
-    "Spanish 🇪🇸": "spanish",
-    "Turkish 🇹🇷": "turkish",
-    "Ukrainian 🇺🇦": "ukrainian"
+    "English 🇬🇧": "en",
+    "Ukrainian 🇺🇦": "uk",
+    "French 🇫🇷": "fr",
+    "Spanish 🇪🇸": "es",
+    "German 🇩🇪": "de",
+    "Polish 🇵🇱": "pl",
+    "Italian 🇮🇹": "it",
+    "Dutch 🇳🇱": "nl",
+    "Portuguese 🇵🇹": "pt",
+    "Russian 🇷🇺": "ru",
+    "Chinese 🇨🇳": "zh-CN",
+    "Arabic 🇸🇦": "ar",
+    "Turkish 🇹🇷": "tr",
+    "Japanese 🇯🇵": "ja",
+    "Korean 🇰🇷": "ko"
 }
-LANGUAGE_BUTTONS = [
-    [KeyboardButton(text)] for text in LANGUAGES.keys()
-] + [["🚀 Почати переклад"]]
 
 user_data_store = {}
 
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("📂 Надішли файл субтитрів у форматі .srt для початку.")
+# --- /start ---
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await update.message.reply_text("👋 Привіт! Надішли мені .srt файл із субтитрами для перекладу.")
     return LANGUAGE_SELECTION
 
-def parse_srt(srt_content):
-    entries = []
-    blocks = re.split(r'\n\n', srt_content.strip())
-    for block in blocks:
-        lines = block.strip().split('\n')
-        if len(lines) >= 3:
-            index = lines[0]
-            timing = lines[1]
-            text = " ".join(lines[2:])
-            entries.append({"index": index, "timing": timing, "text": text})
-    return entries
-
-def build_srt(entries):
-    result = ""
-    for entry in entries:
-        result += f"{entry['index']}\n{entry['timing']}\n{entry['text']}\n\n"
-    return result.strip()
-
-def translate_text(text: str, target_lang: str) -> str:
-    try:
-        return GoogleTranslator(source="auto", target=target_lang).translate(text)
-    except:
-        return text
-
+# --- Handle File ---
 async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
     document = update.message.document
     if not document.file_name.endswith(".srt"):
-        await update.message.reply_text("❌ Це не файл субтитрів .srt. Спробуй ще раз.")
+        await update.message.reply_text("⚠️ Потрібен файл у форматі .srt. Спробуй ще раз.")
         return LANGUAGE_SELECTION
 
-    file = await document.get_file()
-    srt_path = f"temp_{update.effective_user.id}.srt"
-    await file.download_to_drive(srt_path)
+    user_id = update.message.from_user.id
+    file = await context.bot.get_file(document.file_id)
+    file_path = f"{user_id}_original.srt"
+    await file.download_to_drive(file_path)
 
-    with open(srt_path, "r", encoding="utf-8") as f:
-        srt_content = f.read()
+    with open(file_path, 'r', encoding='utf-8') as f:
+        user_data_store[user_id] = {"original": f.read(), "languages": []}
 
-    entries = parse_srt(srt_content)
-    os.remove(srt_path)
-
-    user_data_store[update.effective_user.id] = {
-        "entries": entries,
-        "languages": []
-    }
-
-    await update.message.reply_text(
-        "🌍 Обери мови для перекладу (до 15), потім натисни \"\ud83d\ude80 Почати переклад\"",
-        reply_markup=ReplyKeyboardMarkup(LANGUAGE_BUTTONS, resize_keyboard=True)
-    )
+    keyboard = [[KeyboardButton(lang)] for lang in LANGUAGES.keys()] + [[KeyboardButton("✅ Переклад!")]]
+    await update.message.reply_text("🔤 Обери мови для перекладу:", reply_markup=ReplyKeyboardMarkup(keyboard, resize_keyboard=True))
     return CONFIRM_TRANSLATION
 
+# --- Handle Language Selection ---
 async def handle_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
+    user_id = update.message.from_user.id
     text = update.message.text
-    if text == "🚀 Почати переклад":
-        return await start_translation(update, context)
 
-    if text not in LANGUAGES:
-        return await update.message.reply_text("❌ Невідома мова. Обери з клавіатури.")
+    if text == "✅ Переклад!":
+        langs = user_data_store[user_id].get("languages", [])
+        if not langs:
+            await update.message.reply_text("⚠️ Спочатку обери хоча б одну мову!")
+            return CONFIRM_TRANSLATION
 
-    lang_code = LANGUAGES[text]
-    data = user_data_store.get(user_id, {})
-    if lang_code not in data.get("languages", []):
-        data["languages"].append(lang_code)
-        user_data_store[user_id] = data
-        await update.message.reply_text(f"✅ Додано: {text}")
+        await update.message.reply_text(f"⏳ Розпочинаю переклад на: {', '.join(langs)}")
+        await translate_subtitles(update, context)
+        return ConversationHandler.END
+
+    if text in LANGUAGES:
+        code = LANGUAGES[text]
+        if code not in user_data_store[user_id]["languages"]:
+            user_data_store[user_id]["languages"].append(code)
+            await update.message.reply_text(f"✅ Додано: {text}")
+        else:
+            await update.message.reply_text(f"⚠️ Мову вже додано: {text}")
     else:
-        await update.message.reply_text(f"⚠️ Мову {text} вже додано.")
+        await update.message.reply_text("⛔ Невідома мова. Обери зі списку або натисни 'Переклад!'")
+
     return CONFIRM_TRANSLATION
 
-async def start_translation(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    data = user_data_store.get(user_id)
-    if not data or not data.get("entries"):
-        await update.message.reply_text("❗ Спочатку надішли файл субтитрів.")
-        return LANGUAGE_SELECTION
+# --- Переклад ---
+async def translate_subtitles(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.message.from_user.id
+    original_text = user_data_store[user_id]["original"]
+    languages = user_data_store[user_id]["languages"]
 
-    langs = data.get("languages", [])
-    if not langs:
-        await update.message.reply_text("❗ Не обрано жодної мови.")
-        return CONFIRM_TRANSLATION
+    entries = re.findall(r'(\d+\n\d{2}:\d{2}:\d{2},\d{3} --> .*?\n)(.*?)(?=\n\n|\Z)', original_text, re.DOTALL)
 
-    await update.message.reply_text(
-        f"⏳ Починаю переклад на: {', '.join(langs)}",
-        reply_markup=ReplyKeyboardRemove()
-    )
+    for lang in languages:
+        translated_blocks = []
+        for index, (timing, content) in enumerate(entries):
+            try:
+                translated_text = GoogleTranslator(source='auto', target=lang).translate(text=content.strip())
+                block = f"{index + 1}\n{timing}{translated_text}\n"
+                translated_blocks.append(block)
+            except Exception as e:
+                logging.warning(f"Помилка при перекладі: {e}")
 
-    for lang in langs:
-        translated_entries = []
-        for entry in data["entries"]:
-            translated_text = translate_text(entry["text"], lang)
-            translated_entries.append({
-                "index": entry["index"],
-                "timing": entry["timing"],
-                "text": translated_text
-            })
-        srt_output = build_srt(translated_entries)
-        path = f"translated_{lang}.srt"
-        with open(path, "w", encoding="utf-8") as f:
-            f.write(srt_output)
-        await update.message.reply_document(InputFile(path))
-        os.remove(path)
+        translated_file = f"{user_id}_{lang}.srt"
+        with open(translated_file, 'w', encoding='utf-8') as f:
+            f.write('\n\n'.join(translated_blocks))
 
-    return ConversationHandler.END
+        await context.bot.send_document(chat_id=update.effective_chat.id, document=InputFile(translated_file))
 
+# --- Основна функція ---
 if __name__ == '__main__':
     TOKEN = os.getenv("TELEGRAM_TOKEN")
+    if not TOKEN:
+        raise ValueError("🚨 TELEGRAM_TOKEN не встановлено у середовищі!")
+
     application = ApplicationBuilder().token(TOKEN).build()
 
     conv_handler = ConversationHandler(
         entry_points=[CommandHandler("start", start)],
         states={
             LANGUAGE_SELECTION: [MessageHandler(filters.Document.ALL, handle_file)],
-            CONFIRM_TRANSLATION: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_language)],
+            CONFIRM_TRANSLATION: [MessageHandler(filters.TEXT & (~filters.COMMAND), handle_language)]
         },
-        fallbacks=[CommandHandler("start", start)]
+        fallbacks=[]
     )
 
     application.add_handler(conv_handler)
