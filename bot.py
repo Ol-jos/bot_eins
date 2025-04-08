@@ -5,15 +5,15 @@ from telegram.ext import (ApplicationBuilder, CommandHandler, MessageHandler,
 from deep_translator import GoogleTranslator
 import re
 
-TOKEN = "7731637662:AAH-GOMWgIJTo4hJkkte0_RJ6Al-Q4wvHuU"
+TOKEN = os.environ.get("TELEGRAM_TOKEN")  # ✅ Так правильно — бот читає токен із середовища
 LANGUAGE_SELECTION = range(1)
 user_data_store = {}
 
 # --- Основні мови ---
 LANGUAGES = {
     "Arabic 🇦🇪": "ar",
-    "English 🇬🇮7": "en",
-    "Ukrainian 🇺🇶": "uk",
+    "English 🇬🇧": "en",
+    "Ukrainian 🇺🇦": "uk",
     "French 🇫🇷": "fr",
     "Spanish 🇪🇸": "es",
     "German 🇩🇪": "de",
