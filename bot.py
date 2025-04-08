@@ -161,3 +161,17 @@ if __name__ == '__main__':
 
     # Flask run (for webhook entry)
     app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    if __name__ == "__main__":
+    import os
+
+    TOKEN = os.getenv("TELEGRAM_TOKEN")
+    WEBHOOK_URL = os.getenv("WEBHOOK_URL")
+
+    if not TOKEN or not WEBHOOK_URL:
+        raise ValueError("TELEGRAM_TOKEN і WEBHOOK_URL мають бути задані як змінні середовища.")
+
+    application.run_webhook(
+        listen="0.0.0.0",
+        port=int(os.environ.get("PORT", 5000)),
+        webhook_url=WEBHOOK_URL,
+    )
