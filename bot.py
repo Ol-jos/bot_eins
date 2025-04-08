@@ -130,7 +130,9 @@ if not TOKEN or not WEBHOOK_URL:
 
 application = ApplicationBuilder().token(TOKEN).build()
 application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.Document.MIME_TYPE("application/x-subrip"), handle_file))
+application.add_handler(MessageHandler(
+    filters.Document.ALL, handle_file
+))
 application.add_handler(CallbackQueryHandler(button_handler))
 
 if __name__ == "__main__":
