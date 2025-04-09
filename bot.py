@@ -1,154 +1,124 @@
 import os
-import re
-import tempfile
 import logging
-from telegram import Update, InlineKeyboardButton, InlineKeyboardMarkup, InputFile
+from flask import Flask, request
+from telegram import Update, InlineKeyboardMarkup, InlineKeyboardButton
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
-    CallbackQueryHandler, ContextTypes, filters
+    Application,
+    CommandHandler,
+    MessageHandler,
+    filters,
+    CallbackContext,
+    CallbackQueryHandler,
 )
 from deep_translator import GoogleTranslator
 
-# Логування
-logging.basicConfig(level=logging.INFO)
+# --- Logging ---
+logging.basicConfig(format="%(asctime)s - %(name)s - %(levelname)s - %(message)s", level=logging.INFO)
 
-# Зберігання станів користувачів
-user_states = {}
+# --- Flask App for Webhook ---
+app = Flask(__name__)
 
-# Список мов
-LANGUAGES = {
-    "🇺🇸 English": "en",
-    "🇺🇦 Ukrainian": "uk",
-    "🇩🇪 German": "de",
-    "🇫🇷 French": "fr",
-    "🇪🇸 Spanish": "es",
-    "🇮🇹 Italian": "it",
-    "🇵🇱 Polish": "pl",
-    "🇷🇴 Romanian": "ro",
-    "🇹🇷 Turkish": "tr",
-    "🇸🇦 Arabic": "ar",
-    "🇨🇳 Chinese": "zh-CN",
-    "🇯🇵 Japanese": "ja",
-    "🇰🇷 Korean": "ko",
-    "🇮🇳 Hindi": "hi",
-    "🇧🇷 Portuguese": "pt"
-}
+# --- Telegram Bot ---
+TOKEN = os.getenv("TELEGRAM_TOKEN")
+WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-# Команда старт
-async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("👋 Надішли .srt файл субтитрів для перекладу.")
+application = Application.builder().token(TOKEN).build()
 
-# Отримання .srt файлу
-async def handle_file(update: Update, context: ContextTypes.DEFAULT_TYPE):
+# --- Globals ---
+user_data = {}
+
+# --- Handlers ---
+async def start(update: Update, context: CallbackContext):
+    await update.message.reply_text("👋 Надішли мені .srt файл для перекладу.")
+
+async def handle_file(update: Update, context: CallbackContext):
     document = update.message.document
+
     if not document.file_name.endswith(".srt"):
-        await update.message.reply_text("❌ Надішли файл у форматі .srt.")
+        await update.message.reply_text("❌ Це не .srt файл. Надішли коректний файл субтитрів.")
         return
 
-    file = await document.get_file()
-    with tempfile.NamedTemporaryFile(delete=False) as tmp:
-        await file.download_to_drive(tmp.name)
-        user_states[update.effective_user.id] = {
-            "file_path": tmp.name,
-            "selected_languages": []
-        }
+    user_id = update.message.from_user.id
+    user_data[user_id] = {"file": document, "languages": []}
 
-    # Створення кнопок мов
-    keyboard = [[InlineKeyboardButton(lang, callback_data=code)] for lang, code in LANGUAGES.items()]
-    keyboard.append([InlineKeyboardButton("✅ Переклад", callback_data="translate")])
+    keyboard = [
+        [InlineKeyboardButton("🇺🇸 Англійська", callback_data="en"),
+         InlineKeyboardButton("🇺🇦 Українська", callback_data="uk"),
+         InlineKeyboardButton("🇩🇪 Німецька", callback_data="de")],
+        [InlineKeyboardButton("🇫🇷 Французька", callback_data="fr"),
+         InlineKeyboardButton("🇪🇸 Іспанська", callback_data="es"),
+         InlineKeyboardButton("🇨🇳 Китайська", callback_data="zh-CN")],
+        [InlineKeyboardButton("✅ Почати переклад", callback_data="start_translation")]
+    ]
 
-    await update.message.reply_text(
-        "✅ Файл отримано. Обери мови перекладу:",
-        reply_markup=InlineKeyboardMarkup(keyboard)
-    )
+    await update.message.reply_text("🔤 Обери мови для перекладу:", reply_markup=InlineKeyboardMarkup(keyboard))
 
-# Обробка кнопок
-async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def handle_language_selection(update: Update, context: CallbackContext):
     query = update.callback_query
     await query.answer()
-    user_id = query.from_user.id
 
-    if user_id not in user_states:
-        await query.edit_message_text("⛔ Спочатку надішли файл.")
+    user_id = query.from_user.id
+    data = user_data.get(user_id)
+
+    if not data:
+        await query.edit_message_text("⚠️ Спочатку надішли .srt файл.")
         return
 
-    state = user_states[user_id]
+    lang_code = query.data
 
-    if query.data == "translate":
-        if not state["selected_languages"]:
-            await query.edit_message_text("⚠️ Ви не обрали жодної мови.")
+    if lang_code == "start_translation":
+        if not data["languages"]:
+            await query.edit_message_text("❗ Ти не обрав жодної мови.")
             return
 
-        await query.edit_message_text(f"🔁 Починаю переклад на: {', '.join(state['selected_languages'])}...")
-        await perform_translation(user_id, context)
-    else:
-        lang_code = query.data
-        if lang_code not in state["selected_languages"]:
-            state["selected_languages"].append(lang_code)
+        await query.edit_message_text("🔄 Починаю переклад на мови: " + ", ".join(data["languages"]))
+        await start_translation(update, context, data)
+        return
 
-# Переклад .srt
-async def perform_translation(user_id, context: ContextTypes.DEFAULT_TYPE):
-    state = user_states[user_id]
-    original_path = state["file_path"]
+    if lang_code not in data["languages"]:
+        data["languages"].append(lang_code)
 
-    with open(original_path, "r", encoding="utf-8") as f:
-        lines = f.readlines()
+async def start_translation(update: Update, context: CallbackContext, data):
+    file = await data["file"].get_file()
+    file_content = await file.download_as_bytearray()
+    lines = file_content.decode("utf-8").splitlines()
 
-    blocks = []
-    block = []
+    translated_versions = {}
 
-    for line in lines:
-        if line.strip() == "":
-            if block:
-                blocks.append(block)
-                block = []
-        else:
-            block.append(line)
-    if block:
-        blocks.append(block)
+    for lang in data["languages"]:
+        translated_lines = []
+        for line in lines:
+            if line.strip().isdigit() or "-->" in line or not line.strip():
+                translated_lines.append(line)
+            else:
+                try:
+                    translated = GoogleTranslator(source='auto', target=lang).translate(line)
+                except Exception:
+                    translated = "[ПОМИЛКА ПЕРЕКЛАДУ]"
+                translated_lines.append(translated)
+        translated_versions[lang] = "\n".join(translated_lines)
 
-    for lang_code in state["selected_languages"]:
-        translated_blocks = []
-        for block in blocks:
-            translated_block = []
-            for line in block:
-                if re.match(r"^\d+$", line.strip()) or "-->" in line:
-                    translated_block.append(line)
-                elif line.strip():
-                    translated = GoogleTranslator(source="auto", target=lang_code).translate(line.strip())
-                    translated_block.append(translated + "\n")
-                else:
-                    translated_block.append("\n")
-            translated_blocks.append(translated_block)
+    for lang_code, content in translated_versions.items():
+        filename = f"translated_{lang_code}.srt"
+        with open(filename, "w", encoding="utf-8") as f:
+            f.write(content)
+        await context.bot.send_document(chat_id=update.effective_chat.id, document=open(filename, "rb"))
 
-        translated_content = "\n".join(["".join(b) for b in translated_blocks])
+# --- Telegram Webhook Endpoint ---
+@app.route("/webhook", methods=["POST"])
+def webhook():
+    if request.method == "POST":
+        update = Update.de_json(request.get_json(force=True), application.bot)
+        application.update_queue.put_nowait(update)
+        return "ok"
+    return "not allowed", 403
 
-        with tempfile.NamedTemporaryFile(delete=False, suffix=f"_{lang_code}.srt", mode="w", encoding="utf-8") as out_file:
-            out_file.write(translated_content)
-            output_path = out_file.name
+# --- Register Handlers ---
+application.add_handler(CommandHandler("start", start))
+application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
+application.add_handler(CallbackQueryHandler(handle_language_selection))
 
-        await context.bot.send_document(
-            chat_id=user_id,
-            document=InputFile(output_path),
-            filename=f"translated_{lang_code}.srt"
-        )
-
-# Запуск через Webhook
+# --- Run ---
 if __name__ == "__main__":
-    TOKEN = os.getenv("TELEGRAM_TOKEN")
-    WEBHOOK_URL = os.getenv("WEBHOOK_URL")
-
-    if not TOKEN or not WEBHOOK_URL:
-        raise ValueError("TELEGRAM_TOKEN і WEBHOOK_URL мають бути вказані як змінні середовища.")
-
-    application = ApplicationBuilder().token(TOKEN).build()
-
-    application.add_handler(CommandHandler("start", start))
-    application.add_handler(MessageHandler(filters.Document.ALL, handle_file))
-    application.add_handler(CallbackQueryHandler(button_handler))
-
-    application.run_webhook(
-        listen="0.0.0.0",
-        port=int(os.environ.get("PORT", 5000)),
-        webhook_url=WEBHOOK_URL
-    )
+    PORT = int(os.environ.get("PORT", 5000))
+    app.run(host="0.0.0.0", port=PORT)
