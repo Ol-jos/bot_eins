@@ -1,51 +1,54 @@
 import os
+import logging
 from flask import Flask, request
 from telegram import Update
-from telegram.ext import (
-    Application, CommandHandler, MessageHandler, ContextTypes, filters
-)
+from telegram.ext import Application, CommandHandler, ContextTypes
 
-# Змінні середовища
+# Налаштування логів
+logging.basicConfig(level=logging.INFO)
+logger = logging.getLogger(__name__)
+
+# Flask app
+app = Flask(__name__)
+
+# Токен та URL
 TOKEN = os.getenv("TELEGRAM_TOKEN")
 WEBHOOK_URL = os.getenv("WEBHOOK_URL")
 
-# Перевірка наявності токена та вебхука
+# Перевірка змінних середовища
 if not TOKEN or not WEBHOOK_URL:
     raise ValueError("TELEGRAM_TOKEN і WEBHOOK_URL мають бути задані як змінні середовища.")
 
-# Ініціалізація Flask і Telegram Application
-app = Flask(__name__)
+# Telegram bot
 application = Application.builder().token(TOKEN).build()
 
-
-# === HANDLERS ===
+# === Handlers ===
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Привіт! Надішли мені файл .srt для перекладу.")
+    await update.message.reply_text("👋 Привіт! Надішли мені .srt файл для перекладу.")
 
-
-async def echo(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    await update.message.reply_text("Отримав ваше повідомлення!")
-
-# Додавання обробників
 application.add_handler(CommandHandler("start", start))
-application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, echo))
 
-
-# === ROUTE для Webhook ===
+# === Webhook route ===
 @app.route("/webhook", methods=["POST"])
-def webhook():
-    """Webhook endpoint для Telegram"""
-    update = Update.de_json(request.get_json(force=True), application.bot)
-    application.update_queue.put_nowait(update)
+def webhook() -> tuple[str, int]:
+    """Обробник Telegram оновлень через webhook"""
+    try:
+        update = Update.de_json(request.get_json(force=True), application.bot)
+        application.update_queue.put_nowait(update)
+        logger.info("✅ Update received and queued.")
+    except Exception as e:
+        logger.error(f"❌ Webhook error: {e}")
+        return "error", 500
     return "ok", 200
 
-
-# === FLASK + PTB запуск ===
+# === Flask launcher ===
 if __name__ == "__main__":
     import asyncio
 
-    # Встановлення webhook
-    asyncio.run(application.bot.set_webhook(url=WEBHOOK_URL))
+    async def main():
+        logger.info("🚀 Installing webhook...")
+        await application.bot.set_webhook(WEBHOOK_URL)
+        logger.info("✅ Webhook set successfully.")
+        app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
 
-    # Запуск Flask
-    app.run(host="0.0.0.0", port=int(os.environ.get("PORT", 10000)))
+    asyncio.run(main())
